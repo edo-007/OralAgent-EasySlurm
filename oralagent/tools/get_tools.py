@@ -1,4 +1,5 @@
 """Tool factories and default tool list for OralAgent agent. All tool definitions live here."""
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Any
 
 ###################### add by bryce ######################
@@ -30,6 +31,11 @@ from .histopathology.OSCC5Classification import *
 from .histopathology.Leukoplakia3Classification import *
 
 from .oralgpt_series.OralGPT_Omni import OralGPTOmniTool
+
+# Pre-computed OralGPT-Omni results shipped with the repository
+ORALGPT_OMNI_RESULTS_PATH = str(
+    Path(__file__).resolve().parent / "oralgpt_series" / "results_MMOral-Uni_OralGPT-Omni.xlsx"
+)
 
 ###################### for RAG ######################
 from .rag import *
@@ -291,7 +297,7 @@ def get_all_tools_factories(
 
     def f_oralgpt_omni(device=None):
         """OralGPT-Omni: lookup pre-computed results from Excel by data index (no model run)."""
-        excel_path = f"/home/jinghao/projects/OralGPT-Agent/OralAgent/oralagent/tools/oralgpt_series/results_MMOral-Uni_OralGPT-Omni.xlsx"
+        excel_path = ORALGPT_OMNI_RESULTS_PATH
         return OralGPTOmniTool(excel_path=excel_path, load_excel_on_init=True)
 
     return {
@@ -497,7 +503,7 @@ def get_tools(
 
     # OralGPT-Omni: pseudo tool, looks up pre-computed results from Excel by data index
     oralgpt_omni_tool = OralGPTOmniTool(
-        excel_path=f"/home/jinghao/projects/OralGPT-Agent/OralAgent/oralagent/tools/oralgpt_series/results_MMOral-Uni_OralGPT-Omni.xlsx",
+        excel_path=ORALGPT_OMNI_RESULTS_PATH,
         load_excel_on_init=True,
     )
 

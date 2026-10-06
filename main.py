@@ -53,7 +53,8 @@ def initialize_agent(
     temperature=0.7,
     top_p=0.95,
     rag_config: Optional[RAGConfig] = None,
-    openai_kwargs={}
+    openai_kwargs={},
+    log_tools=True,
 ):
     """Initialize the OralAgent agent with specified tools and configuration.
 
@@ -68,6 +69,7 @@ def initialize_agent(
         top_p (float, optional): Top P for the model. Defaults to 0.95.
         rag_config (RAGConfig, optional): Configuration for the RAG tool. Defaults to None.
         openai_kwargs (dict, optional): Additional keyword arguments for OpenAI API, such as API key and base URL.
+        log_tools (bool, optional): Whether to save every tool call to logs/tool_calls_*.json. Defaults to True.
 
     Returns:
         Tuple[Agent, Dict[str, BaseTool]]: Initialized agent and dictionary of tool instances
@@ -117,7 +119,7 @@ def initialize_agent(
         model,
         intent_classifier_model=intent_classifier_model,
         tools=list(tools_dict.values()),
-        log_tools=True,
+        log_tools=log_tools,
         log_dir="logs",
         system_prompt=system_prompt,
         intent_recognition_prompt=prompt_for_intent_recognition,

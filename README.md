@@ -128,6 +128,30 @@ python launch_OralAgent_local.py
 
 Uses a locally served LLM (e.g. Lingshu, HuatuoGPT, HealthGPT via `launch_server.py` or vLLM) as the agent's reasoning backend. Switch `backend = "custom"` in `startup_event` and set `base_url` (e.g. `http://localhost:8125/v1`) to point at the local model; `api_key` is not required.
 
+### Batch / Slurm (non-interactive)
+
+Define parameters and queries in a YAML job file, submit it, and collect the answers from a file — no server, no chat session.
+
+```bash
+cp jobs/template.yaml jobs/my_job.yaml            # edit model, model_dir, tools, queries
+python run_batch.py jobs/my_job.yaml --check      # validate on the login node (no models loaded)
+sbatch slurm/run_batch.sbatch jobs/my_job.yaml    # submit from the repository root
+```
+
+- **Job file:** LLM settings (`model`, `base_url`, `temperature`), `model_dir`, `tools`, optional `rag` overrides, `output_dir`, and a list of `queries` (`query` text plus optional `image` / `images` paths readable from the compute node). `jobs/template.yaml` documents every parameter. Values can reuse variables with `${name}`, defined in the `vars` block of the job file or taken from the environment.
+- **Output:** one JSON line per query in `<output_dir>/results.jsonl` (`response`, `tool_calls`, `token_usage`, `duration_sec`, `status`); answers are also printed in the Slurm log (set its location with `sbatch --output=...`). Point `output_dir` outside the repository. The images produced by the tools go to `<output_dir>/temp` (change it with `temp_dir`).
+- **Resume:** resubmitting the same job file only runs the queries without an `ok` record (failed ones are retried, so an id can appear more than once: the last line wins). Use `--overwrite` to start from scratch.
+- **Cluster setup:** edit the environment section and the `#SBATCH` resources in `slurm/run_batch.sbatch`. Queries are independent: each one runs in its own thread, with no shared conversation.
+
+**Compute nodes without internet access.** Nothing is downloaded at run time:
+
+1. On the login node (or any machine with internet), fetch all the weights into a directory readable from the compute nodes (ToolHub and OralCorpus are gated: request access and log in to Hugging Face first):
+   ```bash
+   python slurm/download_assets.py /path/to/oralagent_assets --llm Qwen/Qwen2.5-VL-7B-Instruct   # add --rag english for OralRAG
+   ```
+2. Point `ASSETS_DIR` in `slurm/run_batch.sbatch` (or `export ORALAGENT_ASSETS_DIR=...`) to that directory: the script sets `HF_HOME`, `TORCH_HOME` and `HF_HUB_OFFLINE=1`.
+3. Serve the LLM inside the job with the `llm_server` block of the job file (e.g. vLLM): the server is started before the queries, awaited on `<base_url>/models`, and stopped at the end; its log is `<output_dir>/llm_server.log`.
+
 ### Multi-GPU / production-style workers
 
 ```bash
@@ -150,6 +174,7 @@ See `gunicorn_conf.py` and `gpu_utils.py` for worker count and `CUDA_VISIBLE_DEV
 | `main.py` | Gradio app entry |
 | `launch_OralAgent.py` | FastAPI app and `/v1/chat/completions` |
 | `interface.py` | Gradio chat UI |
+| `run_batch.py`, `slurm/`, `jobs/` | Non-interactive batch runner, Slurm script, example job file |
 | `experiments/` | Benchmarks and analysis |
 | `benchmark/`, `data/` | Data layouts (as used by your workflows) |
 

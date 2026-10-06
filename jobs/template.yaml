@@ -1,0 +1,279 @@
+# =====================================================================================
+# OralAgent batch job file - annotated template
+# =====================================================================================
+# A job file describes ONE non-interactive run: which LLM to use, which expert tools to
+# load, where to write the answers, and the list of queries to answer.
+#
+# Workflow (from the repository root):
+#   cp jobs/template.yaml jobs/my_job.yaml          # then edit the copy
+#   python run_batch.py jobs/my_job.yaml --check    # validate on the login node (no models loaded)
+#   sbatch slurm/run_batch.sbatch jobs/my_job.yaml  # submit (see that file for the Slurm log location)
+#
+# Rules of the file:
+#   - Required parameters: model, model_dir, output_dir, queries. Everything else is optional;
+#     optional parameters are shown below commented out, with their default value.
+#   - Unknown parameter names are rejected by --check, so typos are caught before submitting.
+#   - Relative paths are resolved from the directory the job runs in (the repository root when
+#     submitted with slurm/run_batch.sbatch). Absolute paths are safer.
+#   - Every path must be readable from the COMPUTE node, not only from the login node.
+#   - ${name} is replaced with the value of the variable `name`, see section 0.
+
+
+# =====================================================================================
+# 0. Variables
+# =====================================================================================
+# vars (optional, block of name: value)
+#   Variables you can reuse anywhere below (parameters, commands, image paths, queries) by
+#   writing ${name}. Use them for anything repeated, typically base directories, so that a
+#   path is written once and changed in one place.
+#   - A variable can use the ones defined above it, e.g. `weights: ${assets}/OralAgent-ToolHub`.
+#   - A name that is not defined here is looked up in the environment, so ${HOME}, ${USER} or
+#     ${ORALAGENT_ASSETS_DIR} (if exported) work without being listed. Mind that environment
+#     variables must then be set both when you run --check and when you submit.
+#   - A ${name} that is defined nowhere is reported as an error by --check.
+#   - Only the ${name} form is replaced; a bare $name is left as it is (useful in
+#     llm_server.command for variables the shell must expand at run time, like $SLURM_JOB_ID).
+vars:
+  # Directory created by slurm/download_assets.py (the same one ASSETS_DIR /
+  # ORALAGENT_ASSETS_DIR points to in slurm/run_batch.sbatch).
+  assets: /path/to/oralagent_assets
+  # Example of a variable of your own: the folder that contains the images to analyse.
+  images: /path/to/images
+  # Where the results of all your runs are collected. Keep it outside the repository.
+  outputs: /path/to/oralagent_outputs
+
+
+# =====================================================================================
+# 1. LLM "brain"
+# =====================================================================================
+# The LLM that reads the query, decides which expert tools to call, and writes the final
+# answer. It is reached through an OpenAI-compatible HTTP API and must support tool calling
+# (function calling). A vision-capable model is recommended, see send_images_to_llm.
+
+# model (REQUIRED, string)
+#   Model name sent in every request to the endpoint.
+#   - Local server (vLLM, ...): must be identical to the name the server exposes
+#     (--served-model-name in the llm_server command below).
+#   - Remote API: the provider's model id (e.g. gpt-4o-mini).
+#   It is also stored in each result record, so you can tell runs apart.
+model: brain
+
+# base_url (optional, string; REQUIRED when llm_server is set)
+#   Root URL of the OpenAI-compatible endpoint, including the /v1 suffix.
+#   If omitted, OPENAI_BASE_URL or OPENAI_API_BASE from the environment / .env is used, and
+#   without those the official OpenAI endpoint.
+#   The API key is never written here: it is read from OPENAI_API_KEY (environment or .env).
+#   Locally served models do not need one.
+base_url: http://localhost:8000/v1
+
+# llm_server (optional, block)
+#   Serve the LLM inside the Slurm job itself. This is the way to run on compute nodes without
+#   internet access. Remove the whole block if the endpoint in base_url is already running
+#   somewhere reachable (a remote API, or a server started by another job).
+#
+#   command (REQUIRED inside the block, string)
+#     Shell command that starts an OpenAI-compatible server listening on the host/port of
+#     base_url. It is launched only if there are queries left to run, in parallel with the
+#     loading of the expert tools, and it is stopped (together with all its child processes)
+#     when the job ends. Its output is written to <output_dir>/llm_server.log: look there
+#     first if the job fails at startup.
+#     The example uses vLLM; adapt it to your setup:
+#       - the model path is the directory downloaded with `download_assets.py --llm ...`;
+#       - --served-model-name must match `model` above, --port must match base_url;
+#       - --enable-auto-tool-choice / --tool-call-parser enable tool calling; the parser
+#         depends on the model family (hermes is the one for Qwen models);
+#       - the expert tools share the GPU with the LLM: --gpu-memory-utilization limits the
+#         fraction of GPU memory vLLM takes. Alternatively request two GPUs in the sbatch
+#         script and prefix the command with CUDA_VISIBLE_DEVICES=1;
+#       - if vLLM lives in another environment: `conda run -n <env> vllm serve ...`.
+#
+#   startup_timeout (optional, seconds, default 1800)
+#     How long to wait for the server to answer on <base_url>/models. The job fails if the
+#     server exits or is still not ready after this time. Large models on slow filesystems
+#     can take several minutes to load.
+
+# Il simbolo `>` è un operatore YAML chiamato `folded block scalar`
+llm_server:
+  command: >
+    vllm serve ${assets}/llm/Qwen2.5-VL-7B-Instruct
+    --served-model-name brain --port 8000
+    --enable-auto-tool-choice --tool-call-parser hermes
+    --gpu-memory-utilization 0.5
+  startup_timeout: 1800
+
+# temperature (optional, number, default 0.2)
+#   Sampling temperature of the LLM. Low values give more repeatable answers, which is
+#   usually what you want in batch runs. Some hosted models only accept their default value.
+# temperature: 0.2
+
+# send_images_to_llm (optional, true/false, default true)
+#   true:  each image is sent to the LLM (base64) together with its path, so the LLM can look
+#          at it and cross-check the tool outputs. Requires a vision-capable model.
+#   false: only the image path is written in the prompt. Use it with text-only LLMs: the
+#          expert tools and the modality classifier still open the file from disk, but the
+#          final answer relies on tool outputs alone.
+# send_images_to_llm: true
+
+
+# =====================================================================================
+# 2. Expert tools
+# =====================================================================================
+
+# model_dir (REQUIRED, existing directory)
+#   Directory with the expert model weights and their config_* / categories_*.json files,
+#   i.e. the content of https://huggingface.co/OralGPT/OralAgent-ToolHub
+#   (downloaded to the OralAgent-ToolHub subfolder of the assets by slurm/download_assets.py).
+#   The image-modality classifier used on every image query is loaded from here too.
+model_dir: ${assets}/OralAgent-ToolHub
+
+# tools (optional, list of names; default: DEFAULT_SELECTED_TOOL_NAMES in
+#        oralagent/tools/get_tools.py, which currently contains only OralRAG)
+#   The tools made available to the LLM. Every listed tool loads its model on the GPU at
+#   startup, so each one costs GPU memory and startup time: list only the ones relevant to
+#   your images. The LLM then chooses which of them to call for each query, guided by the
+#   image modality detected automatically.
+#   Uncomment the ones you need (names must be written exactly like this):
+tools:
+  # --- Panoramic X-ray ---
+  - PanoramicXRayToothIdDetectionTool                     # detects and numbers the teeth (32 tooth ids)
+  - PanoramicXRayDiseaseSegmentationTool                  # segments 11 disease classes
+  # - PanoramicXRayBoneLossSegmentationTool               # segments bone loss
+  # - PanoramicXRayPeriapicalLesionSubClassDetectionTool  # detects periapical lesions (3 subclasses)
+  # - PanoramicXRayJawStructureSegmentationTool           # segments mandibular canal and maxillary sinus
+  # --- Periapical X-ray ---
+  # - PeriapicalXRayDiseaseSegmentationTool               # segments 6 disease classes
+  # - PeriapicalXRayDiseaseClassificationTool             # image-level classification (7 diseases)
+  # --- Cephalometric X-ray ---
+  # - CephalometricXRayLandmarkDetectionTool              # detects 29 landmarks
+  # - CephalometricXRayCVMstagesClassificationTool        # cervical vertebral maturation stage
+  # --- Intraoral photographs ---
+  # - IntraoralImageConditionDetectionTool                # detects 4 conditions
+  # - IntraoralImageGingivitisDetectionTool               # detects gingivitis
+  # - IntraoralImageFenestrationDetectionTool             # detects fenestration
+  # - IntraoralImageToothTypeDetectionTool                # detects 8 tooth types
+  # - IntraoralImageMalocclusionIssuesDetectionTool       # detects 9 malocclusion issues
+  # - IntraoralImageImageLevelConditionDetectionTool      # image-level classification (9 conditions)
+  # --- Cytopathology ---
+  # - CytopathologyCellNucleusSegmentationTool            # segments cell nuclei (7 conditions)
+  # - CytopathologyCellNucleusGradingTool                 # grades cell nuclei (4 gradings)
+  # --- Histopathology ---
+  # - HistopathologyOSCCSegmentationTool                  # segments oral squamous cell carcinoma
+  # - HistopathologyOSMFOSCCClassificationTool            # image-level classification OSMF / OSCC (5 conditions)
+  # - HistopathologyLeukoplakiaOSCCClassificationTool     # image-level classification leukoplakia / OSCC (3 diseases)
+  # --- Knowledge ---
+  # - OralRAG            # retrieves passages from dental textbooks (OralCorpus); see the rag block below
+  # - OralGPTOmniTool    # NOT a model: looks up pre-computed benchmark answers by query `index`;
+  #                      # only meaningful for the MMOral-Uni benchmark cases
+
+# rag (optional, block; only used when OralRAG is in `tools`)
+#   Settings of the textbook retrieval tool. Any key left out keeps the default shown here.
+#   Offline setup: run `slurm/download_assets.py <assets dir> --rag english`, then set
+#   the language to english and the persist_dir to ${assets}/OralCorpus.
+#   To enable the block, remove the leading "# " from `rag:` and from the keys you change.
+# rag:
+#   corpus_language: chinese                    # chinese | english - which OralCorpus edition to search.
+#                                               # Passages are returned in this language.
+#   persist_dir: oralagent/rag/                 # Directory that contains the vector database. With
+#                                               # use_OralCorpus: true the database is the subfolder
+#                                               # vectorDB_OralCorpus_Chinese or vectorDB_OralCorpus_English.
+#   use_OralCorpus: true                        # true: use the OralCorpus database described above.
+#                                               # false: use/build a database of your own documents
+#                                               # directly in persist_dir (from local_docs_dir).
+#   local_docs_dir: ""                          # Source documents, read ONLY when the vector database
+#                                               # does not exist yet and has to be built: the OralCorpus
+#                                               # .jsonl files, or your own .txt/.pdf/.docx files.
+#                                               # Building is slow; prefer the pre-built database.
+#   embedding_model: Qwen/Qwen3-Embedding-8B    # Embedding model (Hugging Face id). Must be the
+#                                               # same one the vector database was built with.
+#   rerank_model: Qwen/Qwen3-Reranker-8B        # Model that re-orders the retrieved passages.
+#   retriever_k: 7                              # Number of passages retrieved for each question.
+#   chunk_size: 1000                            # Characters per chunk when splitting your own documents
+#   chunk_overlap: 100                          # (local_docs_dir); ignored for the pre-built database.
+#
+#   model: command-a-03-2025                    # Legacy Cohere chat settings: the tool only retrieves
+#   temperature: 0.7                            # passages and never calls this model. Leave as is.
+
+# temp_dir (optional, directory, default: <output_dir>/temp)
+#   Where the tools save the images they produce (boxes, masks, overlays). The paths of these
+#   files appear in the tool outputs recorded in results.jsonl. By default they are kept
+#   next to the results of the same run; set it only to send them somewhere else.
+# temp_dir: /path/to/another/dir
+
+# prompt_file (optional, file, default: oralagent/docs/system_prompts.txt)
+#   Text file with the prompts of the agent, split in [SECTIONS]: MEDICAL_ASSISTANT (system
+#   prompt), INTENT_RECOGNITION_ASSISTANT, ENRICHED_QUERY_TEMPLATE (how your query is rewritten
+#   with intent and image modality) and MODALITY_SECTION_TEMPLATE.
+#   Point it to an edited copy to change the agent's behaviour without touching the original.
+#   Note: the default ENRICHED_QUERY_TEMPLATE tells the LLM it must use the OralGPT-Omni tool,
+#   which only knows benchmark cases; for your own images consider a copy without that line.
+# prompt_file: oralagent/docs/system_prompts.txt
+
+
+# =====================================================================================
+# 3. Output
+# =====================================================================================
+
+# output_dir (REQUIRED, directory; created if missing)
+#   Results are APPENDED to <output_dir>/results.jsonl, one JSON object per query:
+#     id, query, images, index, model, timestamp, duration_sec,
+#     status       "ok" or "error"
+#     response     the final answer            (status ok)
+#     tool_calls   name, args and output of every tool the agent called   (status ok)
+#     token_usage  input_tokens / output_tokens summed over the LLM calls (status ok)
+#     error        the error message           (status error)
+#   The answers are also printed in the Slurm log. llm_server.log and the temp/ folder with
+#   the images produced by the tools (see temp_dir) are written here too.
+#   Resume: submitting the same job file again runs only the queries that have no "ok" record
+#   yet (failed ones are retried, so an id can appear twice: the last line wins).
+#   Use a different output_dir for each experiment, or `run_batch.py --overwrite` to restart.
+#   A relative path would end up inside the repository: use an absolute one, as below.
+output_dir: ${outputs}/my_experiment
+
+
+# =====================================================================================
+# 4. Queries
+# =====================================================================================
+# queries (REQUIRED, list with at least one element)
+#   Each query is answered independently, in its own fresh conversation: there is no memory
+#   between queries, so a query cannot refer to a previous one.
+#   Fields of a query:
+#
+#   query (REQUIRED, string)
+#     The question or instruction, in natural language.
+#
+#   id (optional, string; default q0001, q0002, ... by position)
+#     Unique name of the query. It identifies the answer in results.jsonl and is what the
+#     resume logic relies on: set it explicitly, otherwise adding or reordering queries
+#     changes the automatic ids.
+#
+#   image (optional, path)
+#     One image file to analyse. The agent detects its modality (panoramic, periapical, ...)
+#     and the tools open it from disk.
+#
+#   images (optional, list of paths)
+#     Several images for the same query; takes precedence over `image`. Mind that with more
+#     than one image the agent skips intent/modality detection and forbids every tool except
+#     OralGPT-Omni: to analyse images with the expert tools, use one query per image.
+#
+#   index (optional, integer or string)
+#     Benchmark case index, passed to the agent for OralGPT-Omni lookups. Leave it out for
+#     your own images.
+queries:
+  # Image query: the usual case.
+  - id: pano_1
+    query: Are there any periapical lesions? Report the involved teeth.
+    image: ${images}/panoramic.jpg
+
+  # Text-only query: answered from the LLM's knowledge, plus textbook passages if OralRAG is loaded.
+  - id: knowledge_1
+    query: What are the radiographic signs of a periapical abscess?
+
+  # Short form: a plain string is a text-only query with an automatic id.
+  # - What is the difference between gingivitis and periodontitis?
+
+  # Several images in one query (see the note on `images` above).
+  # - id: compare_1
+  #   query: Compare the two images.
+  #   images:
+  #     - ${images}/before.jpg
+  #     - ${images}/after.jpg
